@@ -1,0 +1,22 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio 2013
+VisualStudioVersion = 12.0.21005.1
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Multithread_Socket_Client_with_Packet_Border", "Multithread_Socket_Client_with_Packet_Border\Multithread_Socket_Client_with_Packet_Border.vcxproj", "{E56DB18C-3433-43C5-873A-EA8A819B20C5}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Win32 = Debug|Win32
+		Release|Win32 = Release|Win32
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{E56DB18C-3433-43C5-873A-EA8A819B20C5}.Debug|Win32.ActiveCfg = Debug|Win32
+		{E56DB18C-3433-43C5-873A-EA8A819B20C5}.Debug|Win32.Build.0 = Debug|Win32
+		{E56DB18C-3433-43C5-873A-EA8A819B20C5}.Release|Win32.ActiveCfg = Release|Win32
+		{E56DB18C-3433-43C5-873A-EA8A819B20C5}.Release|Win32.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
