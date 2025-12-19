@@ -1,3 +1,0 @@
-﻿C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(473,5): warning MSB8003: The WindowsSDKDir property is not defined. Some build tools may not be found.
-  IOMultiplexing_Server.cpp
-C:\Users\wengjx\Desktop\Multiplayer20S2\DM2241_2018S2(FINAL)\DM2241_2018S2\Lesson Files\03. IO Multiplexing\Lab 03\Exercise_01\IOMultiplexing_Server.cpp(1,10): fatal error C1083: Cannot open include file: 'stdio.h': No such file or directory

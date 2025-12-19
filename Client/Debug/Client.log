@@ -1,0 +1,9 @@
+﻿  ClientMain.cpp
+C:\Users\Jonathan\Downloads\Assignment01_244332K_JonathanOoiJingXun\Client\ClientMain.cpp(170,32): warning C4474: 'printf' : too many arguments passed for format string
+      C:\Users\Jonathan\Downloads\Assignment01_244332K_JonathanOoiJingXun\Client\ClientMain.cpp(170,32):
+      placeholders and their parameters expect 0 variadic arguments, but 1 were provided
+  
+C:\Users\Jonathan\Downloads\Assignment01_244332K_JonathanOoiJingXun\Client\ClientMain.cpp(56,31): error C4996: 'inet_addr': Use inet_pton() or InetPton() instead or define _WINSOCK_DEPRECATED_NO_WARNINGS to disable deprecated API warnings
+  packet_manager.cpp
+C:\Users\Jonathan\Downloads\Assignment01_244332K_JonathanOoiJingXun\Client\packet_manager.cpp(50,9): warning C4101: 'ReturnLength': unreferenced local variable
+  Generating Code...

@@ -1,0 +1,9 @@
+﻿  packet_manager.cpp
+C:\Users\Jonathan\Downloads\Assignment01_244332K_JonathanOoiJingXun\Server\packet_manager.cpp(50,9): warning C4101: 'ReturnLength': unreferenced local variable
+  ServerMain.cpp
+C:\Users\Jonathan\Downloads\Assignment01_244332K_JonathanOoiJingXun\Server\ServerMain.cpp(17,83): warning C4474: 'sprintf_s' : too many arguments passed for format string
+      C:\Users\Jonathan\Downloads\Assignment01_244332K_JonathanOoiJingXun\Server\ServerMain.cpp(17,83):
+      placeholders and their parameters expect 0 variadic arguments, but 1 were provided
+  
+  Generating Code...
+  Server.vcxproj -> C:\Users\Jonathan\Downloads\Assignment01_244332K_JonathanOoiJingXun\Debug\Server.exe
