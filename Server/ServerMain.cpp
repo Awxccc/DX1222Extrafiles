@@ -1,5 +1,6 @@
 #include <winsock2.h>
 #include <stdio.h>
+#include <ctype.h>
 #include "packet_manager.h"
 
 #pragma comment(lib, "Ws2_32.lib")
@@ -17,6 +18,7 @@ struct UserInfo {
     bool isRoomMaster;
     bool active;
     int friends[MAX_FRIENDS];
+    int friendRequests[MAX_FRIENDS]; // Stores pending friend requests
     char username[20];
     char status[20];          // Stores "Online", "Away", "Busy"
     int blocked[MAX_FRIENDS]; // Stores IDs of blocked users
@@ -43,7 +45,8 @@ void InitGlobals() {
         g_Users[i].active = false;
         for (int f = 0; f < MAX_FRIENDS; f++) {
             g_Users[i].friends[f] = -1;
-            g_Users[i].blocked[f] = -1; // Init Block List
+            g_Users[i].friendRequests[f] = -1;
+            g_Users[i].blocked[f] = -1;
         }
     }
     for (int i = 0; i < MAX_ROOMS; i++) {
@@ -91,10 +94,15 @@ void SendPacket(SOCKET s, const char* packetID, const char* data) {
     send(s, packet, strlen(packet), 0);
 }
 
-// UPDATED BROADCAST: Takes senderID (Pass -1 for System Messages)
+// UPDATED BROADCAST: Blocks messages to "Busy" users
 void Broadcast(const char* message, int roomID, SOCKET excludeSocket, int senderID) {
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (g_Users[i].active && g_Users[i].roomID == roomID && g_Users[i].socket != excludeSocket) {
+        if (g_Users[i].active && g_Users[i].username[0] != '\0' && g_Users[i].roomID == roomID && g_Users[i].socket != excludeSocket) {
+
+            // Check Busy Status (Only block User messages, allow System messages)
+            if (senderID != -1 && strcmp(g_Users[i].status, "Busy") == 0) {
+                continue;
+            }
 
             bool isBlocked = false;
             if (senderID != -1) {
@@ -105,12 +113,65 @@ void Broadcast(const char* message, int roomID, SOCKET excludeSocket, int sender
                     }
                 }
             }
-
             if (!isBlocked) {
                 SendPacket(g_Users[i].socket, "MSG", message);
             }
         }
     }
+}
+
+// Helper: Get User Count in Room
+int GetUserCountInRoom(int roomID) {
+    int count = 0;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (g_Users[i].active && g_Users[i].username[0] != '\0' && g_Users[i].roomID == roomID) {
+            count++;
+        }
+    }
+    return count;
+}
+
+// Helper: Send Room List (Global)
+void SendRoomList(SOCKET s) {
+    char msg[BUFSIZE] = "\n--- Available Rooms ---\n";
+    bool found = false;
+
+    for (int i = 0; i < MAX_ROOMS; i++) {
+        if (g_Rooms[i].active) {
+            char type[25];
+            if (g_Rooms[i].inviteOnly) strcpy_s(type, 25, "Invite-Only");
+            else if (strlen(g_Rooms[i].password) > 0) strcpy_s(type, 25, "Password Protected");
+            else strcpy_s(type, 25, "Public");
+
+            int count = GetUserCountInRoom(g_Rooms[i].roomID);
+
+            char line[150];
+            sprintf_s(line, 150, "ID: %d | Name: %s | Type: %s | Users: %d\n",
+                g_Rooms[i].roomID, g_Rooms[i].roomName, type, count);
+
+            strcat_s(msg, BUFSIZE, line);
+            found = true;
+        }
+    }
+    if (!found) strcat_s(msg, BUFSIZE, "No active rooms found.\n");
+    strcat_s(msg, BUFSIZE, "-----------------------\n");
+
+    SendPacket(s, "SYS", msg);
+}
+
+// --- Helper to Find User by Name or ID ---
+UserInfo* FindUserByNameOrID(char* input) {
+    if (input == NULL || strlen(input) == 0) return NULL;
+    if (isdigit(input[0])) {
+        int id = atoi(input);
+        return GetUserByID(id);
+    }
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (g_Users[i].active && strcmp(g_Users[i].username, input) == 0) {
+            return &g_Users[i];
+        }
+    }
+    return NULL;
 }
 
 int main() {
@@ -156,24 +217,19 @@ int main() {
                     g_Users[slot].active = true;
                     g_Users[slot].socket = ClientSocket;
                     g_Users[slot].sessionID = g_NextSessionID++;
-                    sprintf_s(g_Users[slot].username, 20, "User_%d", g_Users[slot].sessionID);
+
+                    g_Users[slot].username[0] = '\0';
                     strcpy_s(g_Users[slot].status, 20, "Online");
                     g_Users[slot].roomID = 0; // Join Lobby
                     g_Users[slot].isRoomMaster = false;
 
-                    // Init Block List
-                    for (int b = 0; b < MAX_FRIENDS; b++) g_Users[slot].blocked[b] = -1;
+                    for (int b = 0; b < MAX_FRIENDS; b++) {
+                        g_Users[slot].blocked[b] = -1;
+                        g_Users[slot].friendRequests[b] = -1;
+                        g_Users[slot].friends[b] = -1;
+                    }
 
-                    printf("User Connected: ID %d\n", g_Users[slot].sessionID);
-
-                    // Req 3: Welcome Message
-                    char msg[BUFSIZE];
-                    sprintf_s(msg, BUFSIZE, "Welcome! Your ID is %d", g_Users[slot].sessionID);
-                    SendPacket(ClientSocket, "SYS", msg);
-
-                    sprintf_s(msg, BUFSIZE, "New Connection! ID is %d", g_Users[slot].sessionID);
-                    // FIXED: Added -1 (System Message)
-                    Broadcast(msg, 0, ClientSocket, -1);
+                    printf("Connection Accepted: Socket %d (Waiting for Login)\n", (int)ClientSocket);
                 }
                 else {
                     closesocket(ClientSocket);
@@ -190,11 +246,13 @@ int main() {
                     closesocket(currentSocket);
                     FD_CLR(currentSocket, &ReadFds);
                     if (user) {
+                        if (user->username[0] != '\0') {
+                            char msg[BUFSIZE];
+                            sprintf_s(msg, BUFSIZE, "User %s Left.", user->username);
+                            Broadcast(msg, user->roomID, INVALID_SOCKET, -1);
+                        }
                         user->active = false;
-                        char msg[BUFSIZE];
-                        sprintf_s(msg, BUFSIZE, "User %d Left.", user->sessionID);
-                        // FIXED: Added -1 (System Message)
-                        Broadcast(msg, user->roomID, INVALID_SOCKET, -1);
+                        user->username[0] = '\0';
                     }
                     continue;
                 }
@@ -203,230 +261,415 @@ int main() {
                 char packetData[BUFSIZE];
                 packet_decode(buffer, packetID, packetData);
 
-                // --- COMMANDS ---
+                // --- LOGIN HANDLER ---
+                if (user->username[0] == '\0') {
+                    if (strcmp(packetID, "LOGIN") == 0) {
+                        if (isdigit(packetData[0])) {
+                            SendPacket(user->socket, "ERR", "Username cannot start with a number.");
+                            closesocket(currentSocket);
+                            FD_CLR(currentSocket, &ReadFds);
+                            user->active = false;
+                            continue;
+                        }
 
-                // CHAT (With Block Check)
-                if (strcmp(packetID, "CHAT") == 0) {
-                    RoomInfo* room = GetRoomByID(user->roomID);
-                    if (room && room->isSilenced && !user->isRoomMaster) {
-                        SendPacket(user->socket, "ERR", "The Room Master has silenced this room.");
+                        bool taken = false;
+                        for (int k = 0; k < MAX_CLIENTS; k++) {
+                            if (g_Users[k].active && strcmp(g_Users[k].username, packetData) == 0) {
+                                taken = true;
+                                break;
+                            }
+                        }
+
+                        if (taken) {
+                            SendPacket(user->socket, "ERR", "Name already taken. Please reconnect with a different name.");
+                            closesocket(currentSocket);
+                            FD_CLR(currentSocket, &ReadFds);
+                            user->active = false;
+                        }
+                        else {
+                            strcpy_s(user->username, 20, packetData);
+                            printf("User Logged In: %s (ID %d)\n", user->username, user->sessionID);
+
+                            char msg[BUFSIZE];
+                            sprintf_s(msg, BUFSIZE, "Welcome %s! Your ID is %d. Type /help to see cmds", user->username, user->sessionID);
+                            SendPacket(user->socket, "SYS", msg);
+                            SendRoomList(user->socket);
+
+                            sprintf_s(msg, BUFSIZE, "New User Connected: %s (ID %d)", user->username, user->sessionID);
+                            Broadcast(msg, 0, user->socket, -1);
+                        }
                     }
                     else {
-                        char msg[BUFSIZE];
-                        sprintf_s(msg, BUFSIZE, "[%s]: %s", user->username, packetData);
-                        // Pass user->sessionID so it can be blocked
-                        Broadcast(msg, user->roomID, INVALID_SOCKET, user->sessionID);
+                        SendPacket(user->socket, "ERR", "Please login first.");
+                        closesocket(currentSocket);
+                        FD_CLR(currentSocket, &ReadFds);
+                        user->active = false;
+                    }
+                    continue;
+                }
+
+                // --- COMMANDS ---
+
+                // CHAT 
+                if (strcmp(packetID, "CHAT") == 0) {
+                    if (user->roomID == 0) {
+                        SendPacket(user->socket, "ERR", "You are in the Lobby. Please use /join or /createroom to chat.");
+                    }
+                    else {
+                        RoomInfo* room = GetRoomByID(user->roomID);
+                        if (room && room->isSilenced && !user->isRoomMaster) {
+                            SendPacket(user->socket, "ERR", "The Room Master has silenced this room.");
+                        }
+                        else {
+                            char msg[BUFSIZE];
+                            sprintf_s(msg, BUFSIZE, "[%s]: %s", user->username, packetData);
+                            Broadcast(msg, user->roomID, INVALID_SOCKET, user->sessionID);
+                        }
                     }
                 }
-                // WHISPER (With Block Check & Auto-Reply)
+                // WHISPER (Updated with Busy Check)
                 else if (strcmp(packetID, "WHISP") == 0) {
-                    int targetID;
+                    char targetStr[50];
                     char text[BUFSIZE];
-                    if (sscanf_s(packetData, "%d %[^\n]", &targetID, text, BUFSIZE) == 2) {
-                        UserInfo* target = GetUserByID(targetID);
+
+                    if (sscanf_s(packetData, "%s %[^\n]", targetStr, 50, text, BUFSIZE) == 2) {
+                        UserInfo* target = FindUserByNameOrID(targetStr);
                         if (target) {
-                            // Check Block
-                            bool blocked = false;
-                            for (int b = 0; b < MAX_FRIENDS; b++)
-                                if (target->blocked[b] == user->sessionID) blocked = true;
-
-                            if (!blocked) {
-                                char msg[BUFSIZE];
-                                sprintf_s(msg, BUFSIZE, "Whisper from %s: %s", user->username, text);
-                                SendPacket(target->socket, "MSG", msg);
-
-                                // AFK Auto-Reply
-                                if (strcmp(target->status, "Away") == 0) {
-                                    SendPacket(user->socket, "SYS", "[Auto-Reply] User is currently Away.");
-                                }
-                                else if (strcmp(target->status, "Busy") == 0) {
-                                    SendPacket(user->socket, "SYS", "[Auto-Reply] User is currently Busy.");
-                                }
+                            // Check Busy
+                            if (strcmp(target->status, "Busy") == 0) {
+                                SendPacket(user->socket, "ERR", "User is Busy and not accepting messages.");
                             }
                             else {
-                                SendPacket(user->socket, "ERR", "You are blocked by this user.");
+                                bool blocked = false;
+                                for (int b = 0; b < MAX_FRIENDS; b++)
+                                    if (target->blocked[b] == user->sessionID) blocked = true;
+
+                                if (!blocked) {
+                                    char msg[BUFSIZE];
+                                    sprintf_s(msg, BUFSIZE, "Whisper from %s: %s", user->username, text);
+                                    SendPacket(target->socket, "MSG", msg);
+
+                                    if (strcmp(target->status, "Away") == 0)
+                                        SendPacket(user->socket, "SYS", "[Auto-Reply] User is Away.");
+                                }
+                                else SendPacket(user->socket, "ERR", "You are blocked by this user.");
                             }
                         }
-                        else {
-                            SendPacket(user->socket, "ERR", "User not found");
-                        }
-                    }
-                }
-                // STAT (Strict Mode)
-                else if (strcmp(packetID, "STAT") == 0) {
-                    char newStatus[20];
-                    if (sscanf_s(packetData, "%[^\n]", newStatus, 20) == 1) {
-                        if (strcmp(newStatus, "Online") == 0 ||
-                            strcmp(newStatus, "Away") == 0 ||
-                            strcmp(newStatus, "Busy") == 0) {
-
-                            strcpy_s(user->status, 20, newStatus);
-                            char msg[BUFSIZE];
-                            sprintf_s(msg, BUFSIZE, "Status updated to: %s", newStatus);
-                            SendPacket(user->socket, "SYS", msg);
-                        }
-                        else {
-                            SendPacket(user->socket, "ERR", "Invalid Status. Use: Online, Away, or Busy.");
-                        }
+                        else SendPacket(user->socket, "ERR", "User not found");
                     }
                 }
                 // BLOCK
                 else if (strcmp(packetID, "BLOCK") == 0) {
-                    int targetID = atoi(packetData);
-                    bool added = false;
-                    for (int b = 0; b < MAX_FRIENDS; b++) {
-                        if (user->blocked[b] == -1) {
-                            user->blocked[b] = targetID;
-                            added = true;
-                            break;
+                    UserInfo* target = FindUserByNameOrID(packetData);
+                    if (target) {
+                        if (target->sessionID == user->sessionID) SendPacket(user->socket, "ERR", "Cannot block yourself.");
+                        else {
+                            bool added = false;
+                            for (int b = 0; b < MAX_FRIENDS; b++) {
+                                if (user->blocked[b] == -1) {
+                                    user->blocked[b] = target->sessionID;
+                                    added = true;
+                                    break;
+                                }
+                            }
+                            if (added) SendPacket(user->socket, "SYS", "User Blocked.");
+                            else SendPacket(user->socket, "ERR", "Block list full.");
                         }
                     }
-                    if (added) SendPacket(user->socket, "SYS", "User Blocked.");
-                    else SendPacket(user->socket, "ERR", "Block list full.");
+                    else SendPacket(user->socket, "ERR", "User not found.");
                 }
-                // LIST
+                // LIST (Global)
                 else if (strcmp(packetID, "LIST") == 0) {
                     char listMsg[BUFSIZE] = "Users: ";
                     char temp[50];
                     for (int k = 0; k < MAX_CLIENTS; k++) {
-                        if (g_Users[k].active) {
+                        if (g_Users[k].active && g_Users[k].username[0] != '\0') {
                             sprintf_s(temp, 50, "%s (%s), ", g_Users[k].username, g_Users[k].status);
                             strcat_s(listMsg, BUFSIZE, temp);
                         }
                     }
+                    int len = strlen(listMsg);
+                    if (len > 2 && listMsg[len - 2] == ',') listMsg[len - 2] = '\0';
                     SendPacket(user->socket, "SYS", listMsg);
+                }
+                // ROOMLIST
+                else if (strcmp(packetID, "ROOMLIST") == 0) {
+                    char roomName[50] = "Lobby";
+                    if (user->roomID != 0) {
+                        RoomInfo* r = GetRoomByID(user->roomID);
+                        if (r) strcpy_s(roomName, 50, r->roomName);
+                    }
+                    char listMsg[BUFSIZE];
+                    sprintf_s(listMsg, BUFSIZE, "Users in %s: ", roomName);
+                    char temp[50];
+                    bool found = false;
+                    for (int k = 0; k < MAX_CLIENTS; k++) {
+                        if (g_Users[k].active && g_Users[k].username[0] != '\0' && g_Users[k].roomID == user->roomID) {
+                            sprintf_s(temp, 50, "%s, ", g_Users[k].username);
+                            strcat_s(listMsg, BUFSIZE, temp);
+                            found = true;
+                        }
+                    }
+                    int len = strlen(listMsg);
+                    if (len > 2 && listMsg[len - 2] == ',') listMsg[len - 2] = '\0';
+                    SendPacket(user->socket, "SYS", listMsg);
+                }
+                // LEAVEROOM
+                else if (strcmp(packetID, "LEAVEROOM") == 0) {
+                    if (user->roomID == 0) {
+                        SendPacket(user->socket, "ERR", "You are already in the Lobby.");
+                    }
+                    else {
+                        RoomInfo* r = GetRoomByID(user->roomID);
+                        if (user->isRoomMaster && r) {
+                            int oldRoomID = user->roomID;
+                            r->active = false;
+                            for (int k = 0; k < MAX_CLIENTS; k++) {
+                                if (g_Users[k].active && g_Users[k].roomID == oldRoomID) {
+                                    g_Users[k].roomID = 0;
+                                    g_Users[k].isRoomMaster = false;
+                                    SendPacket(g_Users[k].socket, "SYS", "Room Closed by Master. Returned to Lobby.");
+                                }
+                            }
+                        }
+                        else {
+                            char msg[BUFSIZE];
+                            sprintf_s(msg, BUFSIZE, "%s left the room.", user->username);
+                            Broadcast(msg, user->roomID, user->socket, -1);
+                            user->roomID = 0;
+                            user->isRoomMaster = false;
+                            SendPacket(user->socket, "SYS", "Returned to Lobby.");
+                        }
+                    }
+                }
+                // ROOMS
+                else if (strcmp(packetID, "ROOMS") == 0) {
+                    SendRoomList(user->socket);
                 }
                 // FRIEND
                 else if (strcmp(packetID, "FRIEND") == 0) {
-                    int friendID = atoi(packetData);
-                    if (GetUserByID(friendID)) {
-                        for (int f = 0; f < MAX_FRIENDS; f++) {
-                            if (user->friends[f] == -1) {
-                                user->friends[f] = friendID;
-                                SendPacket(user->socket, "SYS", "Friend Added");
+                    UserInfo* target = FindUserByNameOrID(packetData);
+                    if (!target) SendPacket(user->socket, "ERR", "User not found.");
+                    else if (target->sessionID == user->sessionID) SendPacket(user->socket, "ERR", "Cannot add yourself.");
+                    else {
+                        bool alreadyFriends = false;
+                        for (int f = 0; f < MAX_FRIENDS; f++) if (user->friends[f] == target->sessionID) alreadyFriends = true;
+
+                        if (alreadyFriends) SendPacket(user->socket, "ERR", "Already friends.");
+                        else {
+                            bool sent = false;
+                            for (int r = 0; r < MAX_FRIENDS; r++) {
+                                if (target->friendRequests[r] == -1) {
+                                    target->friendRequests[r] = user->sessionID;
+                                    sent = true;
+                                    break;
+                                }
+                                else if (target->friendRequests[r] == user->sessionID) {
+                                    sent = true; break;
+                                }
+                            }
+                            if (sent) {
+                                SendPacket(user->socket, "SYS", "Friend Request Sent.");
+                                char note[BUFSIZE];
+                                sprintf_s(note, BUFSIZE, "Friend Request from %s. Type /accept %s to add.", user->username, user->username);
+                                SendPacket(target->socket, "SYS", note);
+                            }
+                            else SendPacket(user->socket, "ERR", "User's request list is full.");
+                        }
+                    }
+                }
+                // ACCEPT
+                else if (strcmp(packetID, "ACCEPT") == 0) {
+                    UserInfo* requester = FindUserByNameOrID(packetData);
+                    if (!requester) SendPacket(user->socket, "ERR", "User not found.");
+                    else {
+                        int reqIndex = -1;
+                        for (int r = 0; r < MAX_FRIENDS; r++) {
+                            if (user->friendRequests[r] == requester->sessionID) {
+                                reqIndex = r;
                                 break;
                             }
                         }
+                        if (reqIndex != -1) {
+                            bool addedMe = false;
+                            for (int f = 0; f < MAX_FRIENDS; f++) { if (user->friends[f] == -1) { user->friends[f] = requester->sessionID; addedMe = true; break; } }
+                            bool addedThem = false;
+                            for (int f = 0; f < MAX_FRIENDS; f++) { if (requester->friends[f] == -1) { requester->friends[f] = user->sessionID; addedThem = true; break; } }
+
+                            if (addedMe && addedThem) {
+                                user->friendRequests[reqIndex] = -1;
+                                SendPacket(user->socket, "SYS", "Friend Added!");
+                                char note[BUFSIZE];
+                                sprintf_s(note, BUFSIZE, "%s accepted your friend request!", user->username);
+                                SendPacket(requester->socket, "SYS", note);
+                            }
+                            else SendPacket(user->socket, "ERR", "One of your friend lists is full.");
+                        }
+                        else SendPacket(user->socket, "ERR", "No friend request from this user.");
                     }
                 }
                 // MYFRIENDS
                 else if (strcmp(packetID, "MYFRIENDS") == 0) {
                     char friendListMsg[BUFSIZE] = "Your Friends: ";
-                    char temp[20];
+                    char temp[50];
                     bool found = false;
+                    int onlineCount = 0;
                     for (int f = 0; f < MAX_FRIENDS; f++) {
                         int fID = user->friends[f];
                         if (fID != -1) {
                             UserInfo* friendObj = GetUserByID(fID);
-                            if (friendObj) sprintf_s(temp, 20, "%d(Online), ", fID);
-                            else sprintf_s(temp, 20, "%d(Offline), ", fID);
+                            if (friendObj) { sprintf_s(temp, 50, "%s(Online), ", friendObj->username); onlineCount++; }
+                            else sprintf_s(temp, 50, "%d(Offline), ", fID);
                             strcat_s(friendListMsg, BUFSIZE, temp);
                             found = true;
                         }
                     }
                     if (!found) strcat_s(friendListMsg, BUFSIZE, "No friends added.");
+                    else {
+                        int len = strlen(friendListMsg);
+                        if (len > 2 && friendListMsg[len - 2] == ',') friendListMsg[len - 2] = '\0';
+                        char countMsg[50];
+                        sprintf_s(countMsg, 50, ". Connected: %d", onlineCount);
+                        strcat_s(friendListMsg, BUFSIZE, countMsg);
+                    }
                     SendPacket(user->socket, "SYS", friendListMsg);
                 }
                 // DELFRIEND
                 else if (strcmp(packetID, "DELFRIEND") == 0) {
-                    int targetID = atoi(packetData);
-                    bool found = false;
-                    for (int i = 0; i < MAX_FRIENDS; i++) {
-                        if (user->friends[i] == targetID) {
-                            user->friends[i] = -1;
-                            found = true;
-                            break;
+                    UserInfo* target = FindUserByNameOrID(packetData);
+                    if (target) {
+                        int targetID = target->sessionID;
+                        bool found = false;
+                        for (int i = 0; i < MAX_FRIENDS; i++) {
+                            if (user->friends[i] == targetID) {
+                                user->friends[i] = -1;
+                                found = true;
+                                for (int k = 0; k < MAX_FRIENDS; k++) if (target->friends[k] == user->sessionID) target->friends[k] = -1;
+                                break;
+                            }
                         }
+                        if (found) SendPacket(user->socket, "SYS", "Friend deleted.");
+                        else SendPacket(user->socket, "ERR", "Friend not found in your list.");
                     }
-                    if (found) SendPacket(user->socket, "SYS", "Friend deleted.");
-                    else SendPacket(user->socket, "ERR", "Friend not found.");
+                    else SendPacket(user->socket, "ERR", "User not found.");
                 }
                 // NAME
                 else if (strcmp(packetID, "NAME") == 0) {
                     char newName[20];
                     if (sscanf_s(packetData, "%s", newName, 20) == 1) {
-                        bool taken = false;
-                        for (int k = 0; k < MAX_CLIENTS; k++) {
-                            if (g_Users[k].active && strcmp(g_Users[k].username, newName) == 0) taken = true;
-                        }
-                        if (taken) SendPacket(user->socket, "ERR", "Name already taken.");
+                        if (isdigit(newName[0])) SendPacket(user->socket, "ERR", "Name cannot start with a number.");
                         else {
-                            char notify[BUFSIZE];
-                            sprintf_s(notify, BUFSIZE, "%s changed name to %s", user->username, newName);
-                            Broadcast(notify, user->roomID, INVALID_SOCKET, -1);
-                            strcpy_s(user->username, 20, newName);
-                            SendPacket(user->socket, "SYS", "Name changed successfully.");
+                            bool taken = false;
+                            for (int k = 0; k < MAX_CLIENTS; k++) if (g_Users[k].active && strcmp(g_Users[k].username, newName) == 0) taken = true;
+                            if (taken) SendPacket(user->socket, "ERR", "Name already taken.");
+                            else {
+                                char notify[BUFSIZE];
+                                sprintf_s(notify, BUFSIZE, "%s changed name to %s", user->username, newName);
+                                Broadcast(notify, user->roomID, INVALID_SOCKET, -1);
+                                strcpy_s(user->username, 20, newName);
+                                SendPacket(user->socket, "SYS", "Name changed successfully.");
+                            }
                         }
                     }
                 }
                 // CREATE ROOM
                 else if (strcmp(packetID, "CROOM") == 0) {
-                    char name[50], pass[50];
-                    if (sscanf_s(packetData, "%s %s", name, 50, pass, 50) == 2) {
-                        int rSlot = FindEmptyRoomSlot();
-                        if (rSlot != -1) {
-                            g_Rooms[rSlot].active = true;
-                            g_Rooms[rSlot].roomID = rSlot;
-                            strcpy_s(g_Rooms[rSlot].roomName, 50, name);
-                            strcpy_s(g_Rooms[rSlot].password, 50, pass);
-                            g_Rooms[rSlot].masterSessionID = user->sessionID;
-                            g_Rooms[rSlot].isSilenced = false;
-                            for (int i = 0; i < 10; i++) g_Rooms[rSlot].invitedUsers[i] = -1;
-
-                            user->roomID = rSlot;
-                            user->isRoomMaster = true;
-                            char msg[BUFSIZE];
-                            sprintf_s(msg, BUFSIZE, "Room Created. ID: %d. You are Master.", rSlot);
-                            SendPacket(user->socket, "SYS", msg);
+                    char name[50]; char pass[50] = "";
+                    int args = sscanf_s(packetData, "%s %s", name, 50, pass, 50);
+                    if (args >= 1) {
+                        if (args == 1) pass[0] = '\0';
+                        bool taken = false;
+                        for (int i = 0; i < MAX_ROOMS; i++) if (g_Rooms[i].active && strcmp(g_Rooms[i].roomName, name) == 0) taken = true;
+                        if (taken) SendPacket(user->socket, "ERR", "Room name taken. Try again.");
+                        else {
+                            int rSlot = FindEmptyRoomSlot();
+                            if (rSlot != -1) {
+                                g_Rooms[rSlot].active = true;
+                                g_Rooms[rSlot].roomID = rSlot;
+                                strcpy_s(g_Rooms[rSlot].roomName, 50, name);
+                                strcpy_s(g_Rooms[rSlot].password, 50, pass);
+                                g_Rooms[rSlot].masterSessionID = user->sessionID;
+                                g_Rooms[rSlot].isSilenced = false;
+                                for (int i = 0; i < 10; i++) g_Rooms[rSlot].invitedUsers[i] = -1;
+                                user->roomID = rSlot;
+                                user->isRoomMaster = true;
+                                char msg[BUFSIZE];
+                                sprintf_s(msg, BUFSIZE, "Room Created. ID: %d. You are Master.", rSlot);
+                                SendPacket(user->socket, "SYS", msg);
+                            }
+                            else SendPacket(user->socket, "ERR", "Max rooms reached.");
                         }
                     }
                 }
                 // JOIN ROOM
                 else if (strcmp(packetID, "JOIN") == 0) {
-                    int rID;
-                    char pass[50];
-                    if (sscanf_s(packetData, "%d %s", &rID, pass, 50) == 2) {
-                        RoomInfo* r = GetRoomByID(rID);
-                        if (r == NULL) {
-                            SendPacket(user->socket, "ERR", "Room does not exist.");
-                        }
+                    char target[50]; char pass[50] = "";
+                    int args = sscanf_s(packetData, "%s %s", target, 50, pass, 50);
+                    if (args >= 1) {
+                        if (args == 1) pass[0] = '\0';
+                        RoomInfo* r = NULL;
+                        bool isNum = true;
+                        for (int i = 0; target[i] != '\0'; i++) if (!isdigit(target[i])) { isNum = false; break; }
+                        if (isNum) r = GetRoomByID(atoi(target));
+                        if (r == NULL) for (int i = 0; i < MAX_ROOMS; i++) if (g_Rooms[i].active && strcmp(g_Rooms[i].roomName, target) == 0) { r = &g_Rooms[i]; break; }
+
+                        if (r == NULL) SendPacket(user->socket, "ERR", "Room not found.");
                         else {
+                            bool authorized = false;
+                            int inviteSlot = -1;
+
                             if (r->inviteOnly) {
                                 bool isInvited = false;
                                 for (int i = 0; i < 10; i++) {
-                                    if (r->invitedUsers[i] == user->sessionID) isInvited = true;
+                                    if (r->invitedUsers[i] == user->sessionID) {
+                                        isInvited = true;
+                                        inviteSlot = i;
+                                        break;
+                                    }
                                 }
-                                if (!isInvited) SendPacket(user->socket, "ERR", "Invite-Only.");
-                                else if (strcmp(r->password, pass) == 0) {
-                                    user->roomID = rID;
-                                    SendPacket(user->socket, "SYS", "Joined Room.");
-                                }
-                                else SendPacket(user->socket, "ERR", "Wrong Password.");
+                                if (isInvited) authorized = true;
+                                else SendPacket(user->socket, "ERR", "This room is Invite-Only.");
                             }
-                            else if (strcmp(r->password, pass) == 0) {
-                                user->roomID = rID;
+                            else {
+                                if (strlen(r->password) == 0) authorized = true;
+                                else {
+                                    if (strcmp(r->password, pass) == 0) authorized = true;
+                                    else SendPacket(user->socket, "ERR", "Wrong Password.");
+                                }
+                            }
+
+                            if (authorized) {
+                                if (inviteSlot != -1) r->invitedUsers[inviteSlot] = -1;
+
+                                user->roomID = r->roomID;
+                                user->isRoomMaster = false;
                                 SendPacket(user->socket, "SYS", "Joined Room.");
+                                char broadcastMsg[BUFSIZE];
+                                sprintf_s(broadcastMsg, BUFSIZE, "%s joined the room.", user->username);
+                                Broadcast(broadcastMsg, user->roomID, INVALID_SOCKET, -1);
                             }
-                            else SendPacket(user->socket, "ERR", "Wrong Password.");
                         }
                     }
                 }
                 // KICK
                 else if (strcmp(packetID, "KICK") == 0) {
-                    int targetID = atoi(packetData);
+                    UserInfo* target = FindUserByNameOrID(packetData);
                     RoomInfo* room = GetRoomByID(user->roomID);
                     if (user->isRoomMaster && room && room->masterSessionID == user->sessionID) {
-                        UserInfo* target = GetUserByID(targetID);
-                        if (target && target->roomID == user->roomID) {
-                            target->roomID = 0;
-                            target->isRoomMaster = false;
-                            SendPacket(target->socket, "SYS", "You have been kicked to the Lobby.");
-                            SendPacket(user->socket, "SYS", "User kicked.");
-                            char msg[BUFSIZE];
-                            sprintf_s(msg, BUFSIZE, "User %d was kicked by Master.", targetID);
-                            Broadcast(msg, user->roomID, INVALID_SOCKET, -1);
+                        if (target) {
+                            if (target->sessionID == user->sessionID) SendPacket(user->socket, "ERR", "You cannot kick yourself.");
+                            else if (target->roomID == user->roomID) {
+                                target->roomID = 0;
+                                target->isRoomMaster = false;
+                                SendPacket(target->socket, "SYS", "You have been kicked to the Lobby.");
+                                SendPacket(user->socket, "SYS", "User kicked.");
+                                char msg[BUFSIZE];
+                                sprintf_s(msg, BUFSIZE, "User %s (ID %d) was kicked by Master.", target->username, target->sessionID);
+                                Broadcast(msg, user->roomID, INVALID_SOCKET, -1);
+                            }
+                            else SendPacket(user->socket, "ERR", "User not in your room.");
                         }
-                        else SendPacket(user->socket, "ERR", "User not in your room.");
+                        else SendPacket(user->socket, "ERR", "User not found.");
                     }
                     else SendPacket(user->socket, "ERR", "Only Room Master can kick.");
                 }
@@ -436,29 +679,23 @@ int main() {
                     if (user->isRoomMaster && room) {
                         room->isSilenced = !room->isSilenced;
                         char msg[BUFSIZE];
-                        if (room->isSilenced) sprintf_s(msg, BUFSIZE, "Room Silenced by Master.");
-                        else sprintf_s(msg, BUFSIZE, "Room Unsilenced.");
+                        sprintf_s(msg, BUFSIZE, "Room %s.", room->isSilenced ? "Silenced" : "Unsilenced");
                         Broadcast(msg, user->roomID, INVALID_SOCKET, -1);
                     }
                 }
                 // INVITE
                 else if (strcmp(packetID, "INVITE") == 0) {
-                    int targetID = atoi(packetData);
+                    UserInfo* target = FindUserByNameOrID(packetData);
                     RoomInfo* room = GetRoomByID(user->roomID);
                     if (user->isRoomMaster && room) {
-                        for (int i = 0; i < 10; i++) {
-                            if (room->invitedUsers[i] == -1) {
-                                room->invitedUsers[i] = targetID;
-                                break;
-                            }
-                        }
-                        SendPacket(user->socket, "SYS", "User invited.");
-                        UserInfo* target = GetUserByID(targetID);
                         if (target) {
+                            for (int i = 0; i < 10; i++) if (room->invitedUsers[i] == -1) { room->invitedUsers[i] = target->sessionID; break; }
+                            SendPacket(user->socket, "SYS", "User invited.");
                             char msg[BUFSIZE];
                             sprintf_s(msg, BUFSIZE, "Invited to Room %d ('%s')", room->roomID, room->roomName);
                             SendPacket(target->socket, "SYS", msg);
                         }
+                        else SendPacket(user->socket, "ERR", "User not found.");
                     }
                 }
                 // LOCK
@@ -477,36 +714,69 @@ int main() {
                     if (user->sessionID == 1) {
                         char msg[BUFSIZE];
                         sprintf_s(msg, BUFSIZE, "[GLOBAL ADMIN]: %s", packetData);
-                        for (int i = 0; i < MAX_CLIENTS; i++) {
-                            if (g_Users[i].active) SendPacket(g_Users[i].socket, "MSG", msg);
-                        }
+                        for (int i = 0; i < MAX_CLIENTS; i++) if (g_Users[i].active) SendPacket(g_Users[i].socket, "MSG", msg);
                     }
                     else SendPacket(user->socket, "ERR", "Only Admin (ID 1) can Yell.");
                 }
                 // TRANSFER
                 else if (strcmp(packetID, "TRANSFER") == 0) {
-                    int targetID = atoi(packetData);
+                    UserInfo* target = FindUserByNameOrID(packetData);
                     RoomInfo* room = GetRoomByID(user->roomID);
                     if (user->isRoomMaster && room && room->masterSessionID == user->sessionID) {
-                        UserInfo* target = GetUserByID(targetID);
                         if (target && target->roomID == user->roomID) {
-                            room->masterSessionID = targetID;
+                            room->masterSessionID = target->sessionID;
                             user->isRoomMaster = false;
                             target->isRoomMaster = true;
                             SendPacket(user->socket, "SYS", "You are no longer Master.");
                             SendPacket(target->socket, "SYS", "You are now Master!");
                             char msg[BUFSIZE];
-                            sprintf_s(msg, BUFSIZE, "Master transferred to %s (ID:%d)", target->username, targetID);
+                            sprintf_s(msg, BUFSIZE, "Master transferred to %s (ID:%d)", target->username, target->sessionID);
                             Broadcast(msg, user->roomID, INVALID_SOCKET, -1);
                         }
                         else SendPacket(user->socket, "ERR", "User not found in room.");
                     }
                     else SendPacket(user->socket, "ERR", "You are not Master.");
                 }
-                // HELP
+                // GET STATUS
+                else if (strcmp(packetID, "GETSTAT") == 0) {
+                    char msg[BUFSIZE];
+                    sprintf_s(msg, BUFSIZE, "Current Status: %s", user->status);
+                    SendPacket(user->socket, "SYS", msg);
+                }
+                // CHANGE STATUS - Updated to be case-insensitive
+                else if (strcmp(packetID, "CSTAT") == 0) {
+                    char newStatus[20];
+                    if (sscanf_s(packetData, "%[^\n]", newStatus, 20) == 1) {
+                        // Create a lowercase copy for comparison
+                        char lower[20];
+                        strcpy_s(lower, 20, newStatus);
+                        for (int i = 0; lower[i]; i++) lower[i] = tolower(lower[i]);
+
+                        if (strcmp(lower, "online") == 0) {
+                            strcpy_s(user->status, 20, "Online");
+                            SendPacket(user->socket, "SYS", "Status updated to Online.");
+                        }
+                        else if (strcmp(lower, "away") == 0) {
+                            strcpy_s(user->status, 20, "Away");
+                            SendPacket(user->socket, "SYS", "Status updated to Away.");
+                        }
+                        else if (strcmp(lower, "busy") == 0) {
+                            strcpy_s(user->status, 20, "Busy");
+                            SendPacket(user->socket, "SYS", "Status updated to Busy.");
+                        }
+                        else {
+                            SendPacket(user->socket, "ERR", "Invalid Status. Use: Online, Away, Busy.");
+                        }
+                    }
+                }
+                // HELP (UPDATED TO REMOVE < >)
                 else if (strcmp(packetID, "HELP") == 0) {
-                    const char* help = "Cmds: /w, /list, /quit, /createroom, /join, /kick, /block, /status, /yell, /transfer";
-                    SendPacket(user->socket, "SYS", help);
+                    const char* help1 = "General: /list, /rooms, /roomlist, /join [id/name] [pass], /createroom [name] [pass], /leaveroom, /name [name], /status, /changestatus [stat], /quit";
+                    SendPacket(user->socket, "SYS", help1);
+                    const char* help2 = "Friends/Block: /addfriend [id/name], /accept [id/name], /myfriends, /deletefriend [id/name], /w [id/name] [msg], /block [id/name]";
+                    SendPacket(user->socket, "SYS", help2);
+                    const char* help3 = "Master: /kick [id/name], /silence, /lock, /invite [id/name], /transfer [id/name] | Admin: /yell [msg]";
+                    SendPacket(user->socket, "SYS", help3);
                 }
             }
         }
